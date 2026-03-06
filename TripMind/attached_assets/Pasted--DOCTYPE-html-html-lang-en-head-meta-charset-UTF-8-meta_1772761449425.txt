@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TripMind — AI Travel Itinerary Planner</title>
+    <!-- 
+    SETUP INSTRUCTIONS:
+    1. SUPABASE: Create a project at https://supabase.com
+    2. SQL SCHEMA: Run the following in your Supabase SQL Editor:
+       
+       CREATE TABLE trips (
+         id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+         user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+         title TEXT NOT NULL,
+         destination TEXT NOT NULL,
+         start_date DATE,
+         end_date DATE,
+         budget NUMERIC,
+         style TEXT,
+         cover_emoji TEXT,
+         total_cost NUMERIC DEFAULT 0,
+         created_at TIMESTAMPTZ DEFAULT now()
+       );
+
+       CREATE TABLE days (
+         id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+         trip_id UUID REFERENCES trips(id) ON DELETE CASCADE,
+         day_number INTEGER NOT NULL,
+         date DATE,
+         theme TEXT
+       );
+
+       CREATE TABLE activities (
+         id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+         day_id UUID REFERENCES days(id) ON DELETE CASCADE,
+         title TEXT NOT NULL,
+         time_slot TEXT,
+         category TEXT,
+         cost NUMERIC DEFAULT 0,
+         location TEXT,
+         notes TEXT,
+         status TEXT DEFAULT 'planned',
+         sort_order BIGINT
+       );
+
+       CREATE TABLE packing_items (
+         id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+         trip_id UUID REFERENCES trips(id) ON DELETE CASCADE,
+         item_name TEXT NOT NULL,
+         category TEXT,
+         is_packed BOOLEAN DEFAULT false
+       );
+
+       -- Enable RLS
+       ALTER TABLE trips ENABLE ROW LEVEL SECURITY;
+       ALTER TABLE days ENABLE ROW LEVEL SECURITY;
+       ALTER TABLE activities ENABLE ROW LEVEL SECURITY;
+       ALTER TABLE packing_items ENABLE ROW LEVEL SECURITY;
+
+       -- Policies (Simple version for demo)
+       CREATE POLICY "All" ON trips FOR ALL USING (auth.uid() = user_id);
+       CREATE POLICY "All" ON days FOR ALL USING (true);
+       CREATE POLICY "All" ON activities FOR ALL USING (true);
+       CREATE POLICY "All" ON packing_items FOR ALL USING (true);
+
+    3. AUTH: Enable Google Provider in Supabase Dashboard > Auth > Providers.
+    4. KEYS: Replace the 3 placeholders in the <script> block below:
+       - REPLACE_WITH_YOUR_SUPABASE_URL
+       - REPLACE_WITH_YOUR_SUPABASE_ANON_KEY
+       - REPLACE_WITH_YOUR_GEMINI_API_KEY (Get from https://aistudio.google.com/app/apikey)
+    5. REPLIT: Just paste this into index.html and click Run.
+    -->
+    
+    <!-- React & Babel -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com" crossorigin></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#1E3A5F',
+                        accent: '#2563EB',
+                        success: '#059669',
+                        warning: '#D97706',
+                        danger: '#DC2626',
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <!-- Supabase JS -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" crossorigin></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest" crossorigin></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #F8FAFC; color: #1E3A5F; }
+        .glass-nav { backdrop-filter: blur(8px); background-color: rgba(255, 255, 255, 0.9); }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        .animate-spin-custom { animation: spin 1s linear infinite; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useCallback } = React;
+
+        // === SUPABASE + GEMINI CONFIG ===
+        const SUPABASE_URL = 'REPLACE_WITH_YOUR_SUPABASE_URL';
+        const SUPABASE_ANON_KEY = 'REPLACE_WITH_YOUR_SUPABASE_ANON_KEY';
+        const GEMINI_KEY = 'REPLACE_WITH_YOUR_GEMINI_API_KEY';
+
+        // Safe Supabase Initialization
+        let supabase = null;
+        const isSupabaseConfigured = SUPABASE_URL && !SUPABASE_URL.includes('REPLACE_WITH');
+        
+        try {
+            if (isSupabaseConfigured) {
+                supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+            } else {
+                console.warn("Supabase is not configured. Auth and DB features will be disabled. Demo mode is still available.");
+                // Mock supabase for unauthenticated demo mode
+                supabase = {
+                    auth: {
+                        getSession: async () => ({ data: { session: null } }),
+                        onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
+                        signInWithPassword: async () => ({ error: { message: "Supabase not configured" } }),
+                        signUp: async () => ({ error: { message: "Supabase not configured" } }),
+                        signInWithOAuth: () => alert("Supabase not configured"),
+                        signOut: async () => {}
+                    },
+                    from: () => ({
+                        select: () => ({ eq: () => ({ order: () => ({ data: [], error: null }) }) }),
+                        insert: () => ({ select: () => ({ single: () => ({ data: null, error: { message: "Supabase not configured" } }) }) }),
+                        update: () => ({ eq: () => ({ error: { message: "Supabase not configured" } }) }),
+                        delete: () => ({ eq: () => ({ error: { message: "Supabase not configured" } }) })
+                    })
+                };
+            }
+        } catch (e) {
+            console.error("Failed to initialize Supabase:", e);
+        }
+
+        // === DEMO DATA ===
+        const DEMO_TRIP = {
+            id: 'demo-rajasthan',
+            destination: "Rajasthan, India",
+            days: 4,
+            budget: 40000,
+            style: "Heritage + Food",
+            coverEmoji: "🏛️",
+            itinerary: {
+                days: [
+                    { dayNumber: 1, theme: "Pink City — Jaipur", activities: [
+                        { title: "Amber Fort", timeSlot: "09:00 AM", category: "activity", cost: 500, location: "Amber, Jaipur", notes: "Hire a guide for ₹300 extra — worth it" },
+                        { title: "Hawa Mahal", timeSlot: "12:00 PM", category: "activity", cost: 200, location: "Badi Choupad, Jaipur", notes: "Best photos from the street opposite" },
+                        { title: "Lal Maas Dinner", timeSlot: "07:00 PM", category: "food", cost: 800, location: "Handi Restaurant, Jaipur", notes: "Must-try Rajasthani mutton curry" }
+                    ]},
+                    { dayNumber: 2, theme: "Jaipur Palaces & Culture", activities: [
+                        { title: "City Palace Museum", timeSlot: "10:00 AM", category: "activity", cost: 700, location: "Jaleb Chowk, Jaipur", notes: "Allow 2 hours — beautiful architecture" },
+                        { title: "Jantar Mantar", timeSlot: "01:00 PM", category: "activity", cost: 200, location: "Near City Palace, Jaipur", notes: "UNESCO World Heritage Site" },
+                        { title: "Chokhi Dhani Village", timeSlot: "06:00 PM", category: "food", cost: 1200, location: "Tonk Road, Jaipur", notes: "Traditional village experience" }
+                    ]},
+                    { dayNumber: 3, theme: "Blue City — Jodhpur", activities: [
+                        { title: "Mehrangarh Fort", timeSlot: "10:00 AM", category: "activity", cost: 600, location: "Mehrangarh, Jodhpur", notes: "Largest fort in India" },
+                        { title: "Blue City Walk", timeSlot: "02:00 PM", category: "leisure", cost: 0, location: "Brahmpuri, Jodhpur", notes: "Wander the cobalt blue lanes" },
+                        { title: "On the Rocks Restaurant", timeSlot: "07:00 PM", category: "food", cost: 900, location: "Ajit Bhawan, Jodhpur", notes: "Garden dining" }
+                    ]},
+                    { dayNumber: 4, theme: "Golden City — Jaisalmer", activities: [
+                        { title: "Jaisalmer Golden Fort", timeSlot: "10:00 AM", category: "activity", cost: 500, location: "Fort Road, Jaisalmer", notes: "Living fort" },
+                        { title: "Sam Sand Dunes", timeSlot: "04:00 PM", category: "activity", cost: 2000, location: "Sam Village", notes: "Camel ride + sunset" },
+                        { title: "Desert Camp Dinner", timeSlot: "07:00 PM", category: "food", cost: 1500, location: "Sam Sand Dunes Camp", notes: "Folk music under stars" }
+                    ]}
+                ]
+            }
+        };
+
+        // === HELPER FUNCTIONS ===
+
+        async function callGemini(prompt) {
+            if (!GEMINI_KEY || GEMINI_KEY.includes('REPLACE_WITH')) {
+                throw new Error('Gemini API key is not configured. Please add your key to the script.');
+            }
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text: prompt }] }],
+                    generationConfig: { temperature: 0.4, responseMimeType: "application/json" }
+                })
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error?.message || 'Gemini API call failed');
+            let text = data.candidates[0].content.parts[0].text;
+            text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+            return JSON.parse(text);
+        }
+
+        // === UI COMPONENTS ===
+
+        const Spinner = () => (
+            <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin-custom"></div>
+        );
+
+        const Toast = ({ message, type, onClose }) => {
+            useEffect(() => { const t = setTimeout(onClose, 4000); return () => clearTimeout(t); }, [onClose]);
+            const bg = type === 'error' ? 'bg-danger' : type === 'success' ? 'bg-success' : 'bg-accent';
+            return (
+                <div className={`fixed top-4 right-4 z-[100] px-6 py-3 rounded-xl text-white font-bold shadow-2xl animate-in slide-in-from-right ${bg}`}>
+                    {message}
+                </div>
+            );
+        };
+
+        const Badge = ({ children, category }) => {
+            const styles = {
+                food: 'bg-orange-100 text-orange-700',
+                stay: 'bg-blue-100 text-blue-700',
+                travel: 'bg-purple-100 text-purple-700',
+                activity: 'bg-green-100 text-green-700',
+                leisure: 'bg-pink-100 text-pink-700',
+                default: 'bg-gray-100 text-gray-700'
+            };
+            return <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-md ${styles[category] || styles.default}`}>{children}</span>;
+        };
+
+        const ActivityCard = ({ activity, onEdit, onDelete, onToggle }) => (
+            <div className={`bg-white p-4 rounded-2xl shadow-md border border-gray-100 flex gap-4 transition-all ${activity.status === 'done' ? 'opacity-60 grayscale' : ''}`}>
+                <div className="flex flex-col items-center gap-2">
+                    <button onClick={onToggle} className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${activity.status === 'done' ? 'bg-success border-success text-white' : 'border-gray-200'}`}>
+                        {activity.status === 'done' && <i data-lucide="check" className="w-4 h-4"></i>}
+                    </button>
+                    <div className="w-px flex-1 bg-gray-100"></div>
+                </div>
+                <div className="flex-1 min-w-0">
+                    <div className="flex items-start justify-between gap-2 mb-1">
+                        <h4 className={`font-bold text-gray-900 leading-tight truncate ${activity.status === 'done' ? 'line-through' : ''}`}>{activity.title}</h4>
+                        <span className="text-[10px] font-bold text-gray-400 whitespace-nowrap">{activity.time_slot || activity.timeSlot}</span>
+                    </div>
+                    <div className="flex items-center gap-2 mb-2">
+                        <Badge category={activity.category}>{activity.category}</Badge>
+                        <span className="text-xs font-bold text-primary">₹{activity.cost}</span>
+                    </div>
+                    <p className="text-xs text-gray-500 flex items-center gap-1 mb-1"><i data-lucide="map-pin" className="w-3 h-3"></i> {activity.location}</p>
+                    {activity.notes && <p className="text-xs text-gray-400 italic">"{activity.notes}"</p>}
+                    <div className="flex items-center gap-3 mt-3 pt-3 border-t border-gray-50">
+                        <button onClick={onEdit} className="text-[10px] font-bold uppercase text-accent flex items-center gap-1"><i data-lucide="edit-3" className="w-3 h-3"></i> Edit</button>
+                        <button onClick={onDelete} className="text-[10px] font-bold uppercase text-danger flex items-center gap-1"><i data-lucide="trash-2" className="w-3 h-3"></i> Delete</button>
+                    </div>
+                </div>
+            </div>
+        );
+
+        const TripCard = ({ trip, onClick }) => (
+            <div onClick={onClick} className="bg-white rounded-3xl overflow-hidden shadow-md hover:shadow-xl transition-all cursor-pointer border border-gray-100 group">
+                <div className="h-32 bg-primary/5 relative flex items-center justify-center text-5xl">
+                    {trip.cover_emoji || '✈️'}
+                    <div className="absolute top-3 right-3"><Badge category="activity">{trip.style}</Badge></div>
+                </div>
+                <div className="p-5">
+                    <h3 className="text-lg font-bold text-gray-900 mb-1 truncate">{trip.destination}</h3>
+                    <div className="flex items-center justify-between text-xs text-gray-500 font-medium">
+                        <span>{trip.days_count || 0} Days</span>
+                        <span className="font-bold text-primary">₹{trip.budget?.toLocaleString()}</span>
+                    </div>
+                </div>
+            </div>
+        );
+
+        const BottomNav = ({ current, setScreen }) => (
+            <nav className="fixed bottom-0 left-0 right-0 h-20 bg-white/90 border-t border-gray-100 glass-nav flex items-center justify-around px-6 z-50">
+                {[
+                    { id: 'DASHBOARD', label: 'Home', icon: 'home' },
+                    { id: 'PLANNER', label: 'Planner', icon: 'map' },
+                    { id: 'PACKING', label: 'Packing', icon: 'briefcase' },
+                    { id: 'BUDGET', label: 'Budget', icon: 'pie-chart' }
+                ].map(item => (
+                    <button key={item.id} onClick={() => setScreen(item.id)} className={`flex flex-col items-center gap-1 transition-all ${current === item.id ? 'text-accent scale-110' : 'text-gray-400'}`}>
+                        <i data-lucide={item.icon} className={`w-6 h-6 ${current === item.id ? 'fill-accent/10' : ''}`}></i>
+                        <span className="text-[10px] font-bold uppercase tracking-widest">{item.label}</span>
+                    </button>
+                ))}
+            </nav>
+        );
+
+        // === SCREENS ===
+
+        const AuthScreen = ({ onAuth }) => {
+            const [isLogin, setIsLogin] = useState(true);
+            const [email, setEmail] = useState('');
+            const [password, setPassword] = useState('');
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+
+            const handleAuth = async (e) => {
+                e.preventDefault(); setLoading(true); setError('');
+                try {
+                    const { error } = isLogin ? await supabase.auth.signInWithPassword({ email, password }) : await supabase.auth.signUp({ email, password });
+                    if (error) throw error;
+                    onAuth();
+                } catch (err) { setError(err.message); } finally { setLoading(false); }
+            };
+
+            return (
+                <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-primary to-accent">
+                    <div className="w-full max-w-md bg-white rounded-[2.5rem] p-10 shadow-2xl">
+                        <div className="text-center mb-8">
+                            <div className="w-16 h-16 bg-primary rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-xl text-3xl">✈️</div>
+                            <h1 className="text-3xl font-bold text-primary">TripMind</h1>
+                            <p className="text-gray-500 mt-1">AI-Powered Travel Planner</p>
+                        </div>
+                        <button onClick={() => supabase.auth.signInWithOAuth({ provider: 'google' })} className="w-full flex items-center justify-center gap-3 h-12 rounded-xl border border-gray-200 font-bold text-gray-700 hover:bg-gray-50 transition-all mb-6">
+                            <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-5 h-5" alt="google" />
+                            Continue with Google
+                        </button>
+                        <div className="flex items-center gap-4 mb-6"><div className="flex-1 h-px bg-gray-100"></div><span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">or email</span><div className="flex-1 h-px bg-gray-100"></div></div>
+                        <form onSubmit={handleAuth} className="space-y-4">
+                            <input type="email" placeholder="Email" required className="w-full h-12 px-4 rounded-xl border border-gray-200 outline-none" value={email} onChange={e => setEmail(e.target.value)} />
+                            <input type="password" placeholder="Password" required className="w-full h-12 px-4 rounded-xl border border-gray-200 outline-none" value={password} onChange={e => setPassword(e.target.value)} />
+                            {error && <p className="text-xs font-bold text-danger text-center">{error}</p>}
+                            <button type="submit" disabled={loading} className="w-full bg-primary text-white h-12 rounded-xl font-bold hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 disabled:opacity-50 flex items-center justify-center gap-2">
+                                {loading && <Spinner />} {isLogin ? 'Login' : 'Sign Up'}
+                            </button>
+                        </form>
+                        <p className="text-center mt-6 text-sm text-gray-500">{isLogin ? "Don't have an account?" : "Already have an account?"} <button onClick={() => setIsLogin(!isLogin)} className="text-accent font-bold ml-1">{isLogin ? 'Sign Up' : 'Login'}</button></p>
+                    </div>
+                </div>
+            );
+        };
+
+        const Dashboard = ({ trips, onNewTrip, onSelectTrip, onLoadDemo, loading }) => (
+            <div className="space-y-8 animate-in fade-in duration-500">
+                <div className="flex items-center justify-between">
+                    <div><h2 className="text-3xl font-bold text-gray-900">My Trips</h2><p className="text-sm text-gray-500 font-medium">Your next adventure awaits</p></div>
+                    <button onClick={onNewTrip} className="bg-primary text-white px-5 py-2.5 rounded-xl font-bold flex items-center gap-2 shadow-lg shadow-primary/20 hover:scale-105 transition-all"><i data-lucide="plus" className="w-5 h-5"></i> New Trip</button>
+                </div>
+                {loading ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">{[1,2,3,4].map(i => <div key={i} className="h-48 bg-gray-100 rounded-3xl animate-pulse"></div>)}</div>
+                ) : trips.length === 0 ? (
+                    <div className="bg-white rounded-[2rem] p-12 text-center border border-gray-100 shadow-sm">
+                        <div className="text-7xl mb-6">🏜️</div>
+                        <h3 className="text-xl font-bold text-gray-900 mb-2">No trips yet</h3>
+                        <p className="text-gray-500 mb-8 max-w-xs mx-auto">Create your first AI-powered itinerary or try the demo trip.</p>
+                        <div className="flex flex-col sm:flex-row gap-4 justify-center">
+                            <button onClick={onNewTrip} className="bg-accent text-white px-8 py-3 rounded-xl font-bold shadow-xl shadow-accent/20">Create Trip</button>
+                            <button onClick={onLoadDemo} className="bg-white border border-gray-200 text-gray-700 px-8 py-3 rounded-xl font-bold">Load Demo Trip ✨</button>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">{trips.map(trip => <TripCard key={trip.id} trip={trip} onClick={() => onSelectTrip(trip)} />)}</div>
+                )}
+            </div>
+        );
+
+        const NewTripScreen = ({ user, onSave, onCancel, showToast }) => {
+            const [form, setForm] = useState({ destination: '', days: 3, budget: 20000, style: 'Heritage', coverEmoji: '✈️' });
+            const [generating, setGenerating] = useState(false);
+            const [preview, setPreview] = useState(null);
+
+            const handleGenerate = async () => {
+                if (!form.destination) return showToast("Destination is required", "warning");
+                setGenerating(true);
+                try {
+                    const prompt = `You are a travel expert. Return ONLY valid JSON with no markdown fences. Plan a ${form.days}-day trip to ${form.destination}. Budget: ₹${form.budget}. Travel style: ${form.style}. Return this exact JSON structure: {"days":[{"dayNumber":1,"theme":"Day theme string","activities":[{"title":"Activity name","timeSlot":"09:00 AM","category":"food","cost":500,"location":"Exact place name","notes":"Helpful tip"}]}]}`;
+                    const result = await callGemini(prompt);
+                    setPreview(result);
+                    showToast("Itinerary crafted! ✨", "success");
+                } catch (err) { showToast("AI failed. Try again.", "error"); } finally { setGenerating(false); }
+            };
+
+            const handleSave = async () => {
+                setGenerating(true);
+                try {
+                    const { data: trip, error: tripErr } = await supabase.from('trips').insert({ user_id: user.id, destination: form.destination, title: `${form.destination} ${form.style} Trip`, budget: form.budget, style: form.style, cover_emoji: form.coverEmoji, start_date: new Date().toISOString().split('T')[0], end_date: new Date(Date.now() + form.days * 86400000).toISOString().split('T')[0] }).select().single();
+                    if (tripErr) throw tripErr;
+                    for (const day of preview.days) {
+                        const { data: dayRow, error: dayErr } = await supabase.from('days').insert({ trip_id: trip.id, day_number: day.dayNumber, theme: day.theme, date: new Date(Date.now() + (day.dayNumber - 1) * 86400000).toISOString().split('T')[0] }).select().single();
+                        if (dayErr) throw dayErr;
+                        const acts = day.activities.map((act, idx) => ({ day_id: dayRow.id, title: act.title, time_slot: act.timeSlot, category: act.category, cost: act.cost, location: act.location, notes: act.notes, sort_order: Date.now() + idx }));
+                        await supabase.from('activities').insert(acts);
+                    }
+                    onSave(trip);
+                } catch (err) { showToast(err.message, "error"); } finally { setGenerating(false); }
+            };
+
+            return (
+                <div className="space-y-8 animate-in slide-in-from-bottom duration-500">
+                    <div className="flex items-center gap-4"><button onClick={onCancel} className="p-2 bg-white rounded-xl shadow-sm border border-gray-100"><i data-lucide="arrow-left"></i></button><h2 className="text-2xl font-bold text-gray-900">Plan New Trip</h2></div>
+                    {!preview ? (
+                        <div className="bg-white rounded-[2rem] p-8 shadow-md border border-gray-100 space-y-6">
+                            <div className="space-y-4">
+                                <div><label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Destination</label><input type="text" placeholder="e.g. Rajasthan, India" className="w-full h-14 px-5 rounded-2xl border border-gray-200 outline-none text-lg font-medium" value={form.destination} onChange={e => setForm({...form, destination: e.target.value})} /></div>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div><label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Days</label><input type="number" min="1" max="30" className="w-full h-14 px-5 rounded-2xl border border-gray-200 outline-none font-medium" value={form.days} onChange={e => setForm({...form, days: parseInt(e.target.value)})} /></div>
+                                    <div><label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Budget (₹)</label><input type="number" step="1000" className="w-full h-14 px-5 rounded-2xl border border-gray-200 outline-none font-medium" value={form.budget} onChange={e => setForm({...form, budget: parseInt(e.target.value)})} /></div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div><label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Style</label><select className="w-full h-14 px-5 rounded-2xl border border-gray-200 outline-none font-medium appearance-none bg-white" value={form.style} onChange={e => setForm({...form, style: e.target.value})}>{['Heritage', 'Beach', 'Adventure', 'Food', 'Luxury', 'Budget'].map(s => <option key={s}>{s}</option>)}</select></div>
+                                    <div><label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Emoji</label><div className="flex gap-2 h-14 items-center justify-around bg-gray-50 rounded-2xl px-2">{['✈️', '🏖️', '🏔️', '🌴', '🏛️', '🎭'].map(e => <button key={e} onClick={() => setForm({...form, coverEmoji: e})} className={`text-xl p-1 rounded-lg transition-all ${form.coverEmoji === e ? 'bg-white shadow-sm scale-125' : 'opacity-50'}`}>{e}</button>)}</div></div>
+                                </div>
+                            </div>
+                            <button onClick={handleGenerate} disabled={generating} className="w-full bg-accent text-white h-16 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 shadow-xl shadow-accent/20 hover:scale-[1.02] transition-all disabled:opacity-50">{generating ? <Spinner /> : 'Generate Itinerary ✨'}</button>
+                        </div>
+                    ) : (
+                        <div className="space-y-6 animate-in fade-in duration-500">
+                            <div className="bg-white rounded-[2rem] p-8 shadow-md border border-gray-100">
+                                <h3 className="text-xl font-bold text-primary mb-6 flex items-center gap-2"><i data-lucide="sparkles" className="w-5 h-5 text-accent"></i> AI Preview</h3>
+                                <div className="space-y-8">{preview.days.map(day => (
+                                    <div key={day.dayNumber} className="space-y-4">
+                                        <h4 className="font-bold text-gray-900 flex items-center gap-3"><span className="w-8 h-8 bg-primary/5 text-primary rounded-lg flex items-center justify-center text-sm">D{day.dayNumber}</span>{day.theme}</h4>
+                                        <div className="grid gap-3 pl-11">{day.activities.map((act, i) => <div key={i} className="bg-gray-50 p-3 rounded-xl border border-gray-100"><div className="flex justify-between items-start mb-1"><p className="text-sm font-bold text-gray-800">{act.title}</p><span className="text-[10px] font-bold text-gray-400">{act.timeSlot}</span></div><p className="text-[10px] text-gray-500 truncate">{act.location}</p></div>)}</div>
+                                    </div>
+                                ))}</div>
+                            </div>
+                            <div className="flex gap-4 sticky bottom-4"><button onClick={() => setPreview(null)} className="flex-1 bg-white border border-gray-200 h-16 rounded-2xl font-bold text-gray-700 shadow-lg">Back</button><button onClick={handleSave} disabled={generating} className="flex-[2] bg-success text-white h-16 rounded-2xl font-bold text-lg shadow-xl shadow-success/20 flex items-center justify-center gap-2">{generating ? <Spinner /> : 'Save & Start Trip 🚀'}</button></div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const DayPlanner = ({ trip, onUpdate, showToast }) => {
+            const [activeDayIdx, setActiveDayIdx] = useState(0);
+            const [days, setDays] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [showAddForm, setShowAddForm] = useState(false);
+            const [editingActivity, setEditingActivity] = useState(null);
+
+            const fetchTripData = useCallback(async () => {
+                if (trip.id === 'demo-rajasthan') { setDays(trip.itinerary.days); setLoading(false); return; }
+                setLoading(true);
+                try {
+                    const { data, error } = await supabase.from('days').select('*, activities(*)').eq('trip_id', trip.id).order('day_number', { ascending: true });
+                    if (error) throw error;
+                    setDays(data.map(day => ({ ...day, activities: (day.activities || []).sort((a, b) => a.sort_order - b.sort_order) })));
+                } catch (err) { showToast(err.message, "error"); } finally { setLoading(false); }
+            }, [trip, showToast]);
+
+            useEffect(() => { fetchTripData(); }, [fetchTripData]);
+
+            const handleToggle = async (dayId, activity) => {
+                if (trip.id === 'demo-rajasthan') return showToast("Demo is read-only", "warning");
+                try {
+                    const { error } = await supabase.from('activities').update({ status: activity.status === 'done' ? 'planned' : 'done' }).eq('id', activity.id);
+                    if (error) throw error; fetchTripData(); onUpdate();
+                } catch (err) { showToast(err.message, "error"); }
+            };
+
+            const handleDelete = async (activityId) => {
+                if (trip.id === 'demo-rajasthan') return showToast("Demo is read-only", "warning");
+                if (!confirm("Delete this activity?")) return;
+                try {
+                    const { error } = await supabase.from('activities').delete().eq('id', activityId);
+                    if (error) throw error; fetchTripData(); onUpdate();
+                } catch (err) { showToast(err.message, "error"); }
+            };
+
+            const handleSave = async (e) => {
+                e.preventDefault();
+                if (trip.id === 'demo-rajasthan') return showToast("Demo is read-only", "warning");
+                const fd = new FormData(e.target);
+                const data = Object.fromEntries(fd);
+                data.cost = parseInt(data.cost) || 0;
+                try {
+                    if (editingActivity) { await supabase.from('activities').update(data).eq('id', editingActivity.id); }
+                    else { await supabase.from('activities').insert({ ...data, day_id: days[activeDayIdx].id, sort_order: Date.now() }); }
+                    setShowAddForm(false); setEditingActivity(null); fetchTripData(); onUpdate();
+                } catch (err) { showToast(err.message, "error"); }
+            };
+
+            if (loading) return <div className="flex flex-col items-center justify-center p-20"><Spinner /><p className="mt-4 font-bold text-primary animate-pulse">Loading itinerary...</p></div>;
+
+            const currentDay = days[activeDayIdx];
+
+            return (
+                <div className="space-y-8 animate-in fade-in duration-500">
+                    <div className="bg-white rounded-[2rem] p-6 shadow-md border border-gray-100">
+                        <div className="flex items-center justify-between mb-4"><h2 className="text-2xl font-bold text-primary">{trip.destination}</h2><Badge category="activity">{trip.style}</Badge></div>
+                        <div className="flex items-center gap-4 text-xs font-bold text-gray-400"><span className="flex items-center gap-1"><i data-lucide="calendar" className="w-3 h-3"></i> {trip.days_count || trip.days} Days</span><span className="flex items-center gap-1"><i data-lucide="wallet" className="w-3 h-3"></i> ₹{trip.budget?.toLocaleString()}</span></div>
+                    </div>
+                    <div className="flex gap-2 overflow-x-auto pb-2 hide-scrollbar">{days.map((day, idx) => <button key={idx} onClick={() => setActiveDayIdx(idx)} className={`px-6 py-2.5 rounded-xl font-bold whitespace-nowrap transition-all ${activeDayIdx === idx ? 'bg-primary text-white shadow-lg shadow-primary/20' : 'bg-white text-gray-400 border border-gray-100'}`}>Day {day.day_number || day.dayNumber}</button>)}</div>
+                    <div className="space-y-6">
+                        <div className="flex items-center justify-between"><h3 className="text-xl font-bold text-gray-900">{currentDay?.theme}</h3><button onClick={() => { setEditingActivity(null); setShowAddForm(true); }} className="text-accent font-bold text-sm flex items-center gap-1"><i data-lucide="plus-circle" className="w-4 h-4"></i> Add Activity</button></div>
+                        {currentDay?.activities?.length === 0 ? (
+                            <div className="bg-gray-50 rounded-3xl p-12 text-center border-2 border-dashed border-gray-200"><p className="text-gray-400 font-medium">No activities planned.</p></div>
+                        ) : (
+                            <div className="space-y-4">{currentDay?.activities?.map(act => <ActivityCard key={act.id || act.title} activity={act} onToggle={() => handleToggle(currentDay.id, act)} onDelete={() => handleDelete(act.id)} onEdit={() => { setEditingActivity(act); setShowAddForm(true); }} />)}</div>
+                        )}
+                    </div>
+                    {showAddForm && (
+                        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in duration-200">
+                            <div className="w-full max-w-md bg-white rounded-[2rem] p-8 shadow-2xl animate-in slide-in-from-bottom duration-300">
+                                <div className="flex items-center justify-between mb-6"><h3 className="text-xl font-bold text-primary">{editingActivity ? 'Edit Activity' : 'Add Activity'}</h3><button onClick={() => setShowAddForm(false)} className="p-2 hover:bg-gray-100 rounded-full"><i data-lucide="x"></i></button></div>
+                                <form onSubmit={handleSave} className="space-y-4">
+                                    <input name="title" defaultValue={editingActivity?.title} placeholder="Activity Title" required className="w-full h-12 px-4 rounded-xl border border-gray-200 outline-none" />
+                                    <div className="grid grid-cols-2 gap-4"><input name="time_slot" defaultValue={editingActivity?.time_slot || editingActivity?.timeSlot} placeholder="Time (e.g. 09:00 AM)" required className="w-full h-12 px-4 rounded-xl border border-gray-200 outline-none" /><input name="cost" type="number" defaultValue={editingActivity?.cost} placeholder="Cost (₹)" required className="w-full h-12 px-4 rounded-xl border border-gray-200 outline-none" /></div>
+                                    <select name="category" defaultValue={editingActivity?.category || 'activity'} className="w-full h-12 px-4 rounded-xl border border-gray-200 outline-none bg-white">{['activity', 'food', 'stay', 'travel', 'leisure'].map(c => <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>)}</select>
+                                    <input name="location" defaultValue={editingActivity?.location} placeholder="Location" className="w-full h-12 px-4 rounded-xl border border-gray-200 outline-none" />
+                                    <textarea name="notes" defaultValue={editingActivity?.notes} placeholder="Notes/Tips" className="w-full h-24 p-4 rounded-xl border border-gray-200 outline-none resize-none"></textarea>
+                                    <button type="submit" className="w-full bg-primary text-white h-14 rounded-xl font-bold shadow-lg shadow-primary/20">Save Activity</button>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const PackingList = ({ trip, onUpdate, showToast }) => {
+            const [items, setItems] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [generating, setGenerating] = useState(false);
+            const [newItem, setNewItem] = useState('');
+            const [newCat, setNewCat] = useState('clothing');
+
+            const fetchItems = useCallback(async () => {
+                if (trip.id === 'demo-rajasthan') { setItems([{ id: 1, item_name: 'Cotton Clothes', category: 'clothing', is_packed: false }, { id: 2, item_name: 'Sunscreen', category: 'toiletries', is_packed: true }, { id: 3, item_name: 'Camera', category: 'electronics', is_packed: false }]); setLoading(false); return; }
+                setLoading(true);
+                try { const { data, error } = await supabase.from('packing_items').select('*').eq('trip_id', trip.id); if (error) throw error; setItems(data); } catch (err) { showToast(err.message, "error"); } finally { setLoading(false); }
+            }, [trip, showToast]);
+
+            useEffect(() => { fetchItems(); }, [fetchItems]);
+
+            const handleGenerate = async () => {
+                if (trip.id === 'demo-rajasthan') return showToast("Demo is read-only", "warning");
+                setGenerating(true);
+                try {
+                    const prompt = `Generate a packing list for ${trip.days_count} days in ${trip.destination}. Return ONLY JSON: {"items":[{"name":"Item name","category":"clothing|documents|toiletries|electronics|misc"}]}`;
+                    const result = await callGemini(prompt);
+                    const itemsToInsert = result.items.map(item => ({ trip_id: trip.id, item_name: item.name, category: item.category, is_packed: false }));
+                    await supabase.from('packing_items').insert(itemsToInsert); fetchItems(); showToast("AI suggested items added! ✨", "success");
+                } catch (err) { showToast(err.message, "error"); } finally { setGenerating(false); }
+            };
+
+            const toggleItem = async (item) => {
+                if (trip.id === 'demo-rajasthan') return;
+                try { await supabase.from('packing_items').update({ is_packed: !item.is_packed }).eq('id', item.id); fetchItems(); } catch (err) {}
+            };
+
+            const deleteItem = async (id) => {
+                if (trip.id === 'demo-rajasthan') return;
+                try { await supabase.from('packing_items').delete().eq('id', id); fetchItems(); } catch (err) {}
+            };
+
+            const handleAdd = async (e) => {
+                e.preventDefault(); if (!newItem) return;
+                if (trip.id === 'demo-rajasthan') return showToast("Demo is read-only", "warning");
+                try { await supabase.from('packing_items').insert({ trip_id: trip.id, item_name: newItem, category: newCat, is_packed: false }); setNewItem(''); fetchItems(); } catch (err) {}
+            };
+
+            if (loading) return <div className="flex flex-col items-center justify-center p-20"><Spinner /><p className="mt-4 font-bold text-primary animate-pulse">Getting your gear ready...</p></div>;
+
+            const categories = ['clothing', 'documents', 'toiletries', 'electronics', 'misc'];
+            const grouped = items.reduce((acc, item) => { acc[item.category] = acc[item.category] || []; acc[item.category].push(item); return acc; }, {});
+
+            return (
+                <div className="space-y-8 animate-in slide-in-from-bottom duration-500">
+                    <div className="flex items-center justify-between"><h2 className="text-2xl font-bold text-gray-900">Packing List</h2><button onClick={handleGenerate} disabled={generating} className="text-accent font-bold text-sm flex items-center gap-1 disabled:opacity-50">{generating ? 'Generating...' : '✨ AI Suggest'}</button></div>
+                    <div className="space-y-8">{categories.map(cat => grouped[cat] && (
+                        <div key={cat} className="space-y-3">
+                            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest pl-2">{cat}</h3>
+                            <div className="bg-white rounded-3xl shadow-sm border border-gray-100 overflow-hidden divide-y divide-gray-50">
+                                {grouped[cat].map(item => (
+                                    <div key={item.id} className="flex items-center gap-4 p-4 group">
+                                        <button onClick={() => toggleItem(item)} className={`w-6 h-6 rounded-lg border-2 flex items-center justify-center transition-all ${item.is_packed ? 'bg-success border-success text-white' : 'border-gray-200'}`}>{item.is_packed && <i data-lucide="check" className="w-4 h-4"></i>}</button>
+                                        <span className={`flex-1 font-medium ${item.is_packed ? 'text-gray-300 line-through' : 'text-gray-700'}`}>{item.item_name}</span>
+                                        <button onClick={() => deleteItem(item.id)} className="text-gray-300 hover:text-danger opacity-0 group-hover:opacity-100 transition-all"><i data-lucide="trash-2" className="w-4 h-4"></i></button>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    ))}</div>
+                    <form onSubmit={handleAdd} className="bg-white p-4 rounded-[2rem] shadow-lg border border-gray-100 flex flex-col sm:flex-row gap-3 sticky bottom-24">
+                        <input value={newItem} onChange={e => setNewItem(e.target.value)} placeholder="Add item manually..." className="flex-1 h-12 px-5 rounded-xl border border-gray-100 outline-none" />
+                        <select value={newCat} onChange={e => setNewCat(e.target.value)} className="h-12 px-4 rounded-xl border border-gray-100 outline-none bg-white text-sm font-bold text-gray-500">{categories.map(c => <option key={c} value={c}>{c.toUpperCase()}</option>)}</select>
+                        <button type="submit" className="bg-primary text-white h-12 px-6 rounded-xl font-bold shadow-lg shadow-primary/20">Add</button>
+                    </form>
+                </div>
+            );
+        };
+
+        const BudgetSummary = ({ trip }) => {
+            const [activities, setActivities] = useState([]);
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                const fetchAll = async () => {
+                    if (trip.id === 'demo-rajasthan') { setActivities(trip.itinerary.days.flatMap(d => d.activities.map(a => ({ ...a, day_number: d.dayNumber })))); setLoading(false); return; }
+                    try {
+                        const { data: days, error } = await supabase.from('days').select('id, day_number').eq('trip_id', trip.id);
+                        if (error) throw error;
+                        let all = [];
+                        for (const day of days) {
+                            const { data: acts } = await supabase.from('activities').select('*').eq('day_id', day.id);
+                            all = [...all, ...acts.map(a => ({ ...a, day_number: day.day_number }))];
+                        }
+                        setActivities(all);
+                    } catch (err) {} finally { setLoading(false); }
+                };
+                fetchAll();
+            }, [trip]);
+
+            if (loading) return <div className="flex flex-col items-center justify-center p-20"><Spinner /><p className="mt-4 font-bold text-primary animate-pulse">Calculating expenses...</p></div>;
+
+            const total = activities.reduce((sum, a) => sum + a.cost, 0);
+            const budget = trip.budget || 0;
+            const percentage = Math.min(Math.round((total / budget) * 100), 100);
+            const byCategory = activities.reduce((acc, a) => { acc[a.category] = (acc[a.category] || 0) + a.cost; return acc; }, {});
+            const byDay = activities.reduce((acc, a) => { acc[a.day_number] = (acc[a.day_number] || 0) + a.cost; return acc; }, {});
+            const maxDayCost = Math.max(...Object.values(byDay), 1);
+
+            return (
+                <div className="space-y-8 animate-in fade-in duration-500">
+                    <h2 className="text-2xl font-bold text-gray-900">Budget Summary</h2>
+                    {total > budget && <div className="bg-danger/10 border border-danger/20 p-4 rounded-2xl flex items-center gap-3 text-danger"><i data-lucide="alert-triangle" className="w-5 h-5"></i><p className="text-sm font-bold">Budget exceeded by ₹{(total - budget).toLocaleString()}</p></div>}
+                    <div className="bg-white rounded-[2rem] p-8 shadow-md border border-gray-100 space-y-6">
+                        <div className="flex justify-between items-end"><div><p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Total Spent</p><p className="text-4xl font-bold text-primary">₹{total.toLocaleString()}</p></div><div className="text-right"><p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Budget</p><p className="text-xl font-bold text-gray-700">₹{budget.toLocaleString()}</p></div></div>
+                        <div className="h-4 bg-gray-100 rounded-full overflow-hidden"><div className={`h-full transition-all duration-1000 ${total > budget ? 'bg-danger' : percentage > 80 ? 'bg-warning' : 'bg-success'}`} style={{ width: `${percentage}%` }}></div></div>
+                        <div className="flex justify-between text-xs font-bold"><span className={total > budget ? 'text-danger' : 'text-success'}>{percentage}% Used</span><span className="text-gray-400">₹{(budget - total).toLocaleString()} Remaining</span></div>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                        <div className="bg-white rounded-[2rem] p-6 shadow-md border border-gray-100 space-y-4">
+                            <h3 className="font-bold text-gray-900 flex items-center gap-2"><i data-lucide="pie-chart" className="w-4 h-4 text-accent"></i> Categories</h3>
+                            <div className="space-y-3">{Object.entries(byCategory).map(([cat, cost]) => <div key={cat} className="flex items-center justify-between"><Badge category={cat}>{cat}</Badge><span className="font-bold text-gray-700">₹{cost.toLocaleString()}</span></div>)}</div>
+                        </div>
+                        <div className="bg-white rounded-[2rem] p-6 shadow-md border border-gray-100 space-y-4">
+                            <h3 className="font-bold text-gray-900 flex items-center gap-2"><i data-lucide="bar-chart-2" className="w-4 h-4 text-accent"></i> Daily Spend</h3>
+                            <div className="flex items-end justify-between h-32 pt-4 px-2">{Object.entries(byDay).map(([day, cost]) => (
+                                <div key={day} className="flex flex-col items-center gap-2 flex-1 group relative">
+                                    <div className="absolute -top-6 bg-primary text-white text-[8px] px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-all">₹{cost}</div>
+                                    <div className="w-4 bg-accent/20 rounded-t-sm transition-all duration-500 hover:bg-accent" style={{ height: `${(cost / maxDayCost) * 100}%` }}></div>
+                                    <span className="text-[10px] font-bold text-gray-400">D{day}</span>
+                                </div>
+                            ))}</div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // === APP ROOT ===
+
+        function App() {
+            const [user, setUser] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [currentScreen, setCurrentScreen] = useState('DASHBOARD');
+            const [trips, setTrips] = useState([]);
+            const [activeTrip, setActiveTrip] = useState(null);
+            const [toast, setToast] = useState(null);
+
+            useEffect(() => {
+                supabase.auth.getSession().then(({ data: { session } }) => { setUser(session?.user ?? null); setLoading(false); if (session?.user) fetchTrips(session.user.id); });
+                const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => { setUser(session?.user ?? null); if (session?.user) fetchTrips(session.user.id); else setTrips([]); });
+                return () => subscription.unsubscribe();
+            }, []);
+
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
+
+            const showToast = (message, type = 'info') => setToast({ message, type });
+
+            const fetchTrips = async (uid) => {
+                const { data, error } = await supabase.from('trips').select('*').eq('user_id', uid).order('created_at', { ascending: false });
+                if (!error) setTrips(data);
+            };
+
+            const handleLoadDemo = () => { setTrips([DEMO_TRIP, ...trips]); showToast("Demo trip loaded! No login required.", "success"); };
+
+            if (loading) return <div className="fixed inset-0 bg-white z-50 flex flex-col items-center justify-center"><Spinner /><p className="mt-4 font-bold text-primary animate-pulse">Initializing TripMind...</p></div>;
+
+            if (!user && currentScreen !== 'DASHBOARD') return <AuthScreen onAuth={() => setCurrentScreen('DASHBOARD')} />;
+
+            return (
+                <div className="min-h-screen pb-24">
+                    {user && (
+                        <header className="bg-white/80 backdrop-blur-md sticky top-0 z-40 px-6 h-20 flex items-center justify-between border-b border-gray-100">
+                            <div className="flex items-center gap-3 cursor-pointer" onClick={() => setCurrentScreen('DASHBOARD')}><div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center text-xl shadow-lg shadow-primary/20">✈️</div><h1 className="text-xl font-bold text-primary tracking-tight">TripMind</h1></div>
+                            <div className="flex items-center gap-4"><div className="text-right hidden sm:block"><p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Explorer</p><p className="text-sm font-bold text-gray-900">{user.email.split('@')[0]}</p></div><button onClick={() => supabase.auth.signOut()} className="w-10 h-10 rounded-full bg-gray-50 border border-gray-100 flex items-center justify-center text-gray-400 hover:text-danger transition-all"><i data-lucide="log-out" className="w-5 h-5"></i></button></div>
+                        </header>
+                    )}
+                    <main className="max-w-4xl mx-auto px-6 pt-8">
+                        {!user && currentScreen === 'DASHBOARD' && (
+                            <div className="space-y-12 py-12 text-center">
+                                <h2 className="text-5xl font-black text-primary leading-tight">Plan your next <span className="text-accent">adventure</span> in seconds.</h2>
+                                <p className="text-xl text-gray-500 max-w-lg mx-auto">AI-powered travel companion that crafts perfect itineraries.</p>
+                                <div className="flex flex-col sm:flex-row gap-4 justify-center pt-6"><button onClick={() => setCurrentScreen('LOGIN')} className="bg-primary text-white px-10 py-4 rounded-2xl font-bold text-lg shadow-2xl shadow-primary/30 hover:scale-105 transition-all">Get Started</button><button onClick={handleLoadDemo} className="bg-white border border-gray-200 text-gray-700 px-10 py-4 rounded-2xl font-bold text-lg hover:bg-gray-50 transition-all">Try Demo ✨</button></div>
+                                {trips.length > 0 && <Dashboard trips={trips} onSelectTrip={(t) => { setActiveTrip(t); setCurrentScreen('PLANNER'); }} onLoadDemo={handleLoadDemo} />}
+                            </div>
+                        )}
+                        {user && currentScreen === 'DASHBOARD' && <Dashboard trips={trips} onNewTrip={() => setCurrentScreen('NEW_TRIP')} onSelectTrip={(t) => { setActiveTrip(t); setCurrentScreen('PLANNER'); }} onLoadDemo={handleLoadDemo} />}
+                        {currentScreen === 'NEW_TRIP' && <NewTripScreen user={user} onSave={(trip) => { setActiveTrip(trip); setCurrentScreen('PLANNER'); fetchTrips(user.id); }} onCancel={() => setCurrentScreen('DASHBOARD')} showToast={showToast} />}
+                        {activeTrip && (
+                            <>
+                                {currentScreen === 'PLANNER' && <DayPlanner trip={activeTrip} onUpdate={() => fetchTrips(user.id)} showToast={showToast} />}
+                                {currentScreen === 'PACKING' && <PackingList trip={activeTrip} onUpdate={() => fetchTrips(user.id)} showToast={showToast} />}
+                                {currentScreen === 'BUDGET' && <BudgetSummary trip={activeTrip} />}
+                            </>
+                        )}
+                    </main>
+                    {activeTrip && <BottomNav current={currentScreen} setScreen={setCurrentScreen} />}
+                    {toast && <Toast {...toast} onClose={() => setToast(null)} />}
+                </div>
+            );
+        }
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>

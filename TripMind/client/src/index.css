@@ -1,0 +1,76 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Outfit:wght@500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-sans: 'Inter', sans-serif;
+    --font-display: 'Outfit', sans-serif;
+
+    /* TripMind Brand Colors */
+    --background: 210 40% 98%; /* #F8FAFC */
+    --foreground: 214 52% 15%; /* #11233A */
+    
+    --primary: 214 52% 25%; /* #1E3A5F */
+    --primary-foreground: 210 40% 98%;
+    
+    --accent: 221 83% 53%; /* #2563EB */
+    --accent-foreground: 210 40% 98%;
+
+    --success: 161 94% 30%; /* #059669 */
+    --success-foreground: 210 40% 98%;
+
+    --warning: 38 92% 44%; /* #D97706 */
+    --warning-foreground: 210 40% 98%;
+
+    --danger: 0 84% 60%; /* #DC2626 */
+    --danger-foreground: 210 40% 98%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 214 52% 15%;
+    
+    --popover: 0 0% 100%;
+    --popover-foreground: 214 52% 15%;
+
+    --secondary: 214 32% 91%;
+    --secondary-foreground: 214 52% 25%;
+
+    --muted: 214 32% 91%;
+    --muted-foreground: 215 16% 47%;
+
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 221 83% 53%;
+
+    --radius: 1rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased font-sans overflow-x-hidden;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+    @apply tracking-tight text-primary;
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    @apply bg-white/80 backdrop-blur-md border border-white/50 shadow-xl shadow-primary/5;
+  }
+  
+  .hide-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .hide-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
